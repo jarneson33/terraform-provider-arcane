@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path"
@@ -715,10 +716,43 @@ type ProjectDeployOptions struct {
 }
 
 func (c *Client) CreateProject(ctx context.Context, envID string, body ProjectCreateRequest) (*ProjectCreateResponse, error) {
-	req, err := c.newRequest(ctx, http.MethodPost, path.Join("environments", envID, "projects"), body)
+	// Arcane's POST /environments/{id}/projects requires multipart/form-data
+	// with a "project" field (JSON) and a "manifest" field (JSON).
+	buf := &bytes.Buffer{}
+	writer := multipart.NewWriter(buf)
+
+	// Write the "project" field as JSON
+	projectJSON, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal project: %w", err)
+	}
+	projectPart, err := writer.CreateFormField("project")
+	if err != nil {
+		return nil, fmt.Errorf("create project field: %w", err)
+	}
+	projectPart.Write(projectJSON)
+
+	// Write the "manifest" field as empty JSON object (required by API)
+	manifestJSON := []byte("{}")
+	manifestPart, err := writer.CreateFormField("manifest")
+	if err != nil {
+		return nil, fmt.Errorf("create manifest field: %w", err)
+	}
+	manifestPart.Write(manifestJSON)
+
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("close multipart: %w", err)
+	}
+
+	u := c.BaseURL.ResolveReference(&url.URL{Path: path.Join(c.BaseURL.Path, "environments", envID, "projects")})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), buf)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-API-Key", c.APIKey)
+
 	var env projectCreateEnvelope
 	if err := c.do(req, &env); err != nil {
 		return nil, err
